@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ess-site-monitor"
+version = "1.0.0"
+description = "Validates battery energy-storage telemetry and flags anomalies."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.9.0",
+]
+
+# This makes the JD's "package code ... Python packages" claim real:
+#   python -m build   ->  produces dist/*.whl and dist/*.tar.gz
+
+[tool.setuptools]
+packages = ["app"]
