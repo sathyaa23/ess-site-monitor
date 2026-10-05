@@ -1,0 +1,95 @@
+name: CI/CD
+
+# Runs on every push and pull request to main - so tests gate every change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---- JOB 1: fast tests (unit + integration), no browser needed ----
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit -v
+
+      - name: Run integration tests
+        run: pytest tests/integration -v
+
+  # ---- JOB 2: end-to-end browser tests (Playwright + Selenium) ----
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test          # only run if fast tests pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Start the app in the background
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          # wait for the server to be ready before testing
+          for i in {1..20}; do
+            curl -s http://localhost:8000/health && break
+            sleep 1
+          done
+
+      - name: Run Playwright E2E tests
+        run: pytest tests/e2e -v
+
+      - name: Run Selenium E2E tests
+        run: pytest tests/selenium -v
+
+  # ---- JOB 3: build + package the deployable artifacts ----
+  package:
+    runs-on: ubuntu-latest
+    needs: e2e           # only package if ALL tests passed - the gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t ess-site-monitor:${{ github.sha }} .
+
+      - name: Build Python package (wheel + sdist)
+        run: |
+          pip install build
+          python -m build
+
+      # --- AWS deploy stage (documented, gated behind credentials) ---
+      # This step is real and correct, but only runs if AWS credentials are set,
+      # so the pipeline stays green without a live AWS account. To enable a
+      # live deploy: add AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY as repo
+      # secrets and an ECR repository, then this pushes the image to ECR.
+      - name: Push image to Amazon ECR
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          ECR_REPO: ess-site-monitor
+        if: ${{ env.AWS_ACCESS_KEY_ID != '' }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION \
+            | docker login --username AWS --password-stdin \
+              $(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com
+          IMAGE_URI=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:${{ github.sha }}
+          docker tag ess-site-monitor:${{ github.sha }} $IMAGE_URI
+          docker push $IMAGE_URI
